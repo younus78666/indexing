@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useSession, signIn, signOut } from "next-auth/react";
-import { Search, Globe, Activity, ArrowRight, ShieldCheck, AlertCircle, CheckCircle2, LogOut, LogIn, Link, Loader2, Send, Zap } from "lucide-react";
+import { Search, Globe, Activity, ArrowRight, ShieldCheck, AlertCircle, CheckCircle2, LogOut, LogIn, Link, Loader2, Send, Zap, RefreshCw } from "lucide-react";
 
 type UrlAnalysis = {
   status: 'checking' | 'done' | 'error';
@@ -291,8 +291,15 @@ export default function Dashboard() {
                   </div>
                 )}
                 <button
+                  onClick={() => { setSites([]); setSelectedSite(null); setUrls([]); signIn('google', undefined, { prompt: 'select_account' }); }}
+                  className="p-2 ml-1 rounded-full text-slate-400 hover:text-indigo-400 hover:bg-indigo-500/10 transition-colors"
+                  title="Switch Google Account"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+                <button
                   onClick={() => signOut()}
-                  className="p-2 ml-2 rounded-full text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
+                  className="p-2 ml-1 rounded-full text-slate-400 hover:text-white hover:bg-white/5 transition-colors"
                   title="Sign Out"
                 >
                   <LogOut className="w-4 h-4" />
