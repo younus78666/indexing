@@ -17,6 +17,8 @@ export default function Dashboard() {
 
   const [activeTab, setActiveTab] = useState<'sitemap' | 'bulk'>('sitemap');
   const [bulkUrlsText, setBulkUrlsText] = useState("");
+  const [isInspecting, setIsInspecting] = useState(false);
+  const [bulkAnalysis, setBulkAnalysis] = useState<{ url: string, status: 'checking' | 'done' | 'error', isIndexed?: boolean, coverageState?: string }[] | null>(null);
 
   // Fetch sites when user authenticates
   useEffect(() => {
@@ -98,11 +100,16 @@ export default function Dashboard() {
     }
   };
 
-  const handleBulkSubmit = async (type: 'gsc' | 'indexnow') => {
-    const urlsToSubmit = bulkUrlsText
+  const handleBulkSubmit = async (type: 'gsc' | 'indexnow', onlyUnindexed = false) => {
+    let urlsToSubmit = bulkUrlsText
       .split('\n')
       .map(u => u.trim())
       .filter(u => u !== '' && u.startsWith('http'));
+
+    if (onlyUnindexed && bulkAnalysis) {
+      // Filter the original list to only include those we strictly know are not indexed
+      urlsToSubmit = bulkAnalysis.filter(a => a.isIndexed === false).map(a => a.url);
+    }
 
     if (urlsToSubmit.length === 0) {
       alert("No valid URLs found. Please ensure each line starts with http:// or https://");
@@ -137,6 +144,7 @@ export default function Dashboard() {
         }
         alert(`Successfully sent ${urlsToSubmit.length} URLs to IndexNow!`);
         setBulkUrlsText("");
+        setBulkAnalysis(null);
       } else {
         // GSC API currently requires 1 API call per URL for indexing endpoint
         for (let i = 0; i < urlsToSubmit.length; i++) {
@@ -152,13 +160,89 @@ export default function Dashboard() {
           await new Promise(resolve => setTimeout(resolve, 300));
         }
         alert(`Successfully submitted ${successCount} URLs to Google Search Console for indexing!`);
-        if (successCount === urlsToSubmit.length) setBulkUrlsText("");
+        if (successCount === urlsToSubmit.length) {
+          setBulkUrlsText("");
+          setBulkAnalysis(null);
+        }
       }
     } catch (e) {
       console.error(e);
       alert("An error occurred during bulk submission. Re-check the console.");
     } finally {
       setIsSubmitting(false);
+    }
+  };
+
+  const handleBulkInspect = async () => {
+    const urlsToInspect = bulkUrlsText
+      .split('\n')
+      .map(u => u.trim())
+      .filter(u => u !== '' && u.startsWith('http'));
+
+    if (urlsToInspect.length === 0) {
+      alert("No valid URLs found to inspect.");
+      return;
+    }
+
+    if (urlsToInspect.length > 50) {
+      alert("To avoid Google rate limits, please inspect less than 50 URLs at a time.");
+      return;
+    }
+
+    setIsInspecting(true);
+
+    // Initialize state with 'checking' status for all
+    const initialAnalysis = urlsToInspect.map(url => ({ url, status: 'checking' as const }));
+    setBulkAnalysis(initialAnalysis);
+
+    try {
+      // Create a copy we can mutate
+      let currentAnalysis = [...initialAnalysis];
+
+      // We make requests sequentially (with small delays) to avoid hitting GSC quotas (QPS limit is usually ~5)
+      for (let i = 0; i < urlsToInspect.length; i++) {
+        const targetUrl = urlsToInspect[i];
+
+        try {
+          const res = await fetch('/api/gsc/inspect', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: targetUrl, siteUrl: selectedSite })
+          });
+
+          if (!res.ok) throw new Error("API Error");
+          const data = await res.json();
+
+          // Update state incrementally
+          currentAnalysis[i] = {
+            url: targetUrl,
+            status: 'done' as const,
+            isIndexed: data.isIndexed,
+            coverageState: data.coverageState
+          };
+
+          setBulkAnalysis([...currentAnalysis]);
+
+        } catch (e) {
+          currentAnalysis[i] = {
+            url: targetUrl,
+            status: 'error' as const,
+            coverageState: 'Inspection Failed'
+          };
+          setBulkAnalysis([...currentAnalysis]);
+        }
+
+        // 500ms delay between inspections to be safe
+        if (i < urlsToInspect.length - 1) {
+          await new Promise(r => setTimeout(r, 500));
+        }
+      }
+
+    } catch (e) {
+      console.error("Inspection error", e);
+      alert("A general error occurred during inspection.");
+    } finally {
+      setIsInspecting(false);
     }
   };
 
@@ -313,42 +397,115 @@ export default function Dashboard() {
               )
             ) : (
               /* Bulk Paste View */
-              <div className="bg-[#0a0a0a] border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+              <div className="bg-[#0a0a0a] border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
                 <div className="flex items-center justify-between mb-2">
-                  <h3 className="font-medium text-slate-200">Manual URL Submission</h3>
+                  <h3 className="font-medium text-slate-200">Manual URL Submission & Inspection</h3>
                   <span className="text-xs text-slate-500">Google allows up to 200 URLs per day per property</span>
                 </div>
 
-                <textarea
-                  value={bulkUrlsText}
-                  onChange={(e) => setBulkUrlsText(e.target.value)}
-                  placeholder={`Paste your URLs here, one per line.\n\nExample:\nhttps://${selectedSite?.replace('sc-domain:', '') || 'example.com'}/new-blog-post\nhttps://${selectedSite?.replace('sc-domain:', '') || 'example.com'}/about-us`}
-                  className="w-full h-64 bg-black/50 border border-slate-700 rounded-xl p-4 text-sm text-slate-300 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-                />
+                {bulkUrlsText.trim() === '' || !bulkAnalysis ? (
+                  /* Input View */
+                  <>
+                    <textarea
+                      value={bulkUrlsText}
+                      onChange={(e) => {
+                        setBulkUrlsText(e.target.value);
+                        setBulkAnalysis(null);
+                      }}
+                      placeholder={`Paste your URLs here, one per line.\n\nExample:\nhttps://${selectedSite?.replace('sc-domain:', '') || 'example.com'}/new-blog-post\nhttps://${selectedSite?.replace('sc-domain:', '') || 'example.com'}/about-us`}
+                      className="w-full h-64 bg-black/50 border border-slate-700 rounded-xl p-4 text-sm text-slate-300 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                    />
 
-                <div className="flex justify-between items-center pt-2">
-                  <div className="text-sm text-slate-400">
-                    <span className="text-indigo-400 font-medium">{bulkUrlsText.split('\n').filter(u => u.trim() !== '').length}</span> URLs detected
+                    <div className="flex justify-between items-center">
+                      <div className="text-sm text-slate-400">
+                        <span className="text-indigo-400 font-medium">{bulkUrlsText.split('\n').filter(u => u.trim() !== '' && u.startsWith('http')).length}</span> valid URLs detected
+                      </div>
+                      <button
+                        onClick={handleBulkInspect}
+                        disabled={isInspecting || bulkUrlsText.trim() === ''}
+                        className="px-6 py-2.5 text-sm font-medium rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {isInspecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+                        {isInspecting ? 'Inspecting Google Status...' : 'Check Index Status'}
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  /* Results View */
+                  <div className="animate-in fade-in slide-in-from-bottom-4 duration-300">
+                    <div className="flex items-center justify-between mb-4 border-b border-slate-800 pb-4">
+                      <div className="flex gap-4">
+                        <div className="text-sm">
+                          <span className="text-slate-500">Total: </span>
+                          <span className="text-slate-200 font-medium">{bulkAnalysis.length}</span>
+                        </div>
+                        <div className="text-sm">
+                          <span className="text-slate-500">Indexed: </span>
+                          <span className="text-emerald-400 font-medium">{bulkAnalysis.filter(a => a.isIndexed).length}</span>
+                        </div>
+                        <div className="text-sm">
+                          <span className="text-slate-500">Not Indexed: </span>
+                          <span className="text-amber-400 font-medium">{bulkAnalysis.filter(a => a.status === 'done' && !a.isIndexed).length}</span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setBulkAnalysis(null)}
+                        className="text-xs text-indigo-400 hover:text-indigo-300"
+                      >
+                        Start Over
+                      </button>
+                    </div>
+
+                    <div className="max-h-[400px] overflow-y-auto mb-6 pr-2">
+                      <ul className="space-y-2">
+                        {bulkAnalysis.map((item, i) => (
+                          <li key={i} className="p-3 bg-black/40 border border-slate-800 rounded-lg flex justify-between items-center">
+                            <div className="flex items-center gap-3 overflow-hidden">
+                              {item.status === 'checking' ? (
+                                <Loader2 className="w-4 h-4 text-indigo-500 animate-spin shrink-0" />
+                              ) : item.isIndexed ? (
+                                <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                              ) : (
+                                <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />
+                              )}
+                              <span className={`text-sm truncate ${item.isIndexed === false ? 'text-slate-200 font-medium' : 'text-slate-400'}`} title={item.url}>
+                                {item.url}
+                              </span>
+                            </div>
+                            <div className="shrink-0 text-xs text-right ml-4">
+                              {item.status === 'checking' ? (
+                                <span className="text-indigo-400">Checking...</span>
+                              ) : item.isIndexed ? (
+                                <span className="text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded">Indexed</span >
+                              ) : (
+                                <span className="text-amber-500 bg-amber-500/10 px-2 py-1 rounded">{item.coverageState || 'Not Indexed'}</span>
+                              )}
+                            </div>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+
+                    <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
+                      <button
+                        onClick={() => handleBulkSubmit('indexnow', true)}
+                        disabled={isSubmitting || bulkAnalysis.filter(a => a.status === 'done' && !a.isIndexed).length === 0}
+                        className="px-6 py-2.5 text-sm font-medium rounded-xl bg-emerald-600/20 text-emerald-500 hover:bg-emerald-600/30 border border-emerald-500/20 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <img src="https://www.bing.com/sa/simg/favicon-2x.ico" className="w-4 h-4 rounded-full opacity-70" alt="Bing" />
+                        Bing ({bulkAnalysis.filter(a => a.status === 'done' && !a.isIndexed).length} Unindexed)
+                      </button>
+                      <button
+                        onClick={() => handleBulkSubmit('gsc', true)}
+                        disabled={isSubmitting || bulkAnalysis.filter(a => a.status === 'done' && !a.isIndexed).length === 0}
+                        className="px-6 py-2.5 text-sm font-medium rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-colors flex items-center gap-2 disabled:opacity-50 shadow-lg shadow-indigo-500/20 disabled:cursor-not-allowed"
+                      >
+                        <Globe className="w-4 h-4" />
+                        {isSubmitting ? 'Submitting...' : `Google (${bulkAnalysis.filter(a => a.status === 'done' && !a.isIndexed).length} Unindexed)`}
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex gap-3">
-                    <button
-                      onClick={() => handleBulkSubmit('indexnow')}
-                      disabled={isSubmitting || bulkUrlsText.trim() === ''}
-                      className="px-6 py-2.5 text-sm font-medium rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                      <img src="https://www.bing.com/sa/simg/favicon-2x.ico" className="w-4 h-4 rounded-full" alt="Bing" />
-                      Bulk Bing Index
-                    </button>
-                    <button
-                      onClick={() => handleBulkSubmit('gsc')}
-                      disabled={isSubmitting || bulkUrlsText.trim() === ''}
-                      className="px-6 py-2.5 text-sm font-medium rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-colors flex items-center gap-2 disabled:opacity-50 shadow-lg shadow-indigo-500/20 disabled:cursor-not-allowed"
-                    >
-                      <Globe className="w-4 h-4" />
-                      {isSubmitting ? 'Submitting...' : 'Bulk Google Index'}
-                    </button>
-                  </div>
-                </div>
+                )}
               </div>
             )}
           </div>
