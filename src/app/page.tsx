@@ -2,23 +2,28 @@
 
 import { useState, useEffect } from "react";
 import { useSession, signIn, signOut } from "next-auth/react";
-import { Search, Plus, Globe, Settings, Activity, ArrowRight, ShieldCheck, Mail, AlertCircle, CheckCircle2, LogOut, LogIn, Link, Loader2, Send } from "lucide-react";
+import { Search, Globe, Activity, ArrowRight, ShieldCheck, AlertCircle, CheckCircle2, LogOut, LogIn, Link, Loader2, Send } from "lucide-react";
+
+type UrlAnalysis = {
+  status: 'checking' | 'done' | 'error';
+  isIndexed?: boolean;
+  coverageState?: string;
+};
 
 export default function Dashboard() {
   const { data: session, status } = useSession();
 
   const [sites, setSites] = useState<any[]>([]);
   const [selectedSite, setSelectedSite] = useState<string | null>(null);
+
   const [urls, setUrls] = useState<string[]>([]);
+  const [selectedUrls, setSelectedUrls] = useState<string[]>([]);
+  const [urlAnalyses, setUrlAnalyses] = useState<Record<string, UrlAnalysis>>({});
 
   const [isLoadingSites, setIsLoadingSites] = useState(false);
   const [isLoadingUrls, setIsLoadingUrls] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  const [activeTab, setActiveTab] = useState<'sitemap' | 'bulk'>('sitemap');
-  const [bulkUrlsText, setBulkUrlsText] = useState("");
   const [isInspecting, setIsInspecting] = useState(false);
-  const [bulkAnalysis, setBulkAnalysis] = useState<{ url: string, status: 'checking' | 'done' | 'error', isIndexed?: boolean, coverageState?: string }[] | null>(null);
 
   // Fetch sites when user authenticates
   useEffect(() => {
@@ -46,8 +51,11 @@ export default function Dashboard() {
     setSelectedSite(siteUrl);
     setIsLoadingUrls(true);
     setUrls([]);
+    setSelectedUrls([]);
+    setUrlAnalyses({});
+
     try {
-      // Fix for sc-domain: prefix which trips up some URL parsers if not fully encoded twice or handled properly
+      // Fix for sc-domain: prefix
       const queryParam = encodeURIComponent(siteUrl);
       const res = await fetch(`/api/gsc/urls?siteUrl=${queryParam}`);
 
@@ -58,6 +66,9 @@ export default function Dashboard() {
       const data = await res.json();
       if (data.success && data.urls) {
         setUrls(data.urls);
+        // By default, do NOT select all to prevent accidental huge actions, or do we?
+        // Let's select none by default to force manual selection or select all
+        setSelectedUrls([]);
       } else {
         alert(data.message || data.error || "No sitemaps found.");
       }
@@ -69,55 +80,10 @@ export default function Dashboard() {
     }
   };
 
-  const submitIndexing = async (targetUrl: string, type: 'gsc' | 'indexnow') => {
-    setIsSubmitting(true);
-    try {
-      if (type === 'gsc') {
-        await fetch('/api/gsc', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url: targetUrl, type: 'URL_UPDATED' })
-        });
-        alert(`Successfully requested indexing for ${targetUrl} via Google`);
-      } else {
-        // Determine host dynamically from URL
-        const urlObj = new URL(targetUrl);
-        const host = urlObj.host;
-        // In a real app we would get the key dynamically or from the db
-        const key = "example-verification-key";
-
-        await fetch('/api/indexnow', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ host, key, urls: [targetUrl] })
-        });
-        alert(`Successfully sent ${targetUrl} to IndexNow`);
-      }
-    } catch (e) {
-      alert("Failed to submit for indexing. See console.");
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleBulkSubmit = async (type: 'gsc' | 'indexnow', onlyUnindexed = false) => {
-    let urlsToSubmit = bulkUrlsText
-      .split('\n')
-      .map(u => u.trim())
-      .filter(u => u !== '' && u.startsWith('http'));
-
-    if (onlyUnindexed && bulkAnalysis) {
-      // Filter the original list to only include those we strictly know are not indexed
-      urlsToSubmit = bulkAnalysis.filter(a => a.isIndexed === false).map(a => a.url);
-    }
-
-    if (urlsToSubmit.length === 0) {
-      alert("No valid URLs found. Please ensure each line starts with http:// or https://");
-      return;
-    }
-
-    if (urlsToSubmit.length > 200) {
-      alert("Google allows a maximum of 200 indexing requests per day. Please reduce your list.");
+  const submitIndexing = async (targetUrls: string[], type: 'gsc' | 'indexnow') => {
+    if (targetUrls.length === 0) return;
+    if (targetUrls.length > 200 && type === 'gsc') {
+      alert("Google allows a maximum of 200 indexing requests per day per property.");
       return;
     }
 
@@ -126,10 +92,8 @@ export default function Dashboard() {
       let successCount = 0;
 
       if (type === 'indexnow') {
-        // IndexNow accepts bulk URLs natively in one payload!
-        // Group by host in case user pasted multiple domains
         const hostGroups: { [key: string]: string[] } = {};
-        for (const u of urlsToSubmit) {
+        for (const u of targetUrls) {
           const host = new URL(u).host;
           if (!hostGroups[host]) hostGroups[host] = [];
           hostGroups[host].push(u);
@@ -142,66 +106,51 @@ export default function Dashboard() {
             body: JSON.stringify({ host, key: "example-verification-key", urls: hostGroups[host] })
           });
         }
-        alert(`Successfully sent ${urlsToSubmit.length} URLs to IndexNow!`);
-        setBulkUrlsText("");
-        setBulkAnalysis(null);
+        alert(`Successfully sent ${targetUrls.length} URLs to IndexNow!`);
       } else {
-        // GSC API currently requires 1 API call per URL for indexing endpoint
-        for (let i = 0; i < urlsToSubmit.length; i++) {
-          const targetUrl = urlsToSubmit[i];
+        for (let i = 0; i < targetUrls.length; i++) {
           await fetch('/api/gsc', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: targetUrl, type: 'URL_UPDATED' })
+            body: JSON.stringify({ url: targetUrls[i], type: 'URL_UPDATED' })
           });
           successCount++;
-
-          // Very small artificial delay to avoid hitting Google's rate limits instantly
           await new Promise(resolve => setTimeout(resolve, 300));
         }
         alert(`Successfully submitted ${successCount} URLs to Google Search Console for indexing!`);
-        if (successCount === urlsToSubmit.length) {
-          setBulkUrlsText("");
-          setBulkAnalysis(null);
-        }
       }
     } catch (e) {
       console.error(e);
-      alert("An error occurred during bulk submission. Re-check the console.");
+      alert("An error occurred during submission. Re-check the console.");
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleBulkInspect = async () => {
-    const urlsToInspect = bulkUrlsText
-      .split('\n')
-      .map(u => u.trim())
-      .filter(u => u !== '' && u.startsWith('http'));
-
-    if (urlsToInspect.length === 0) {
-      alert("No valid URLs found to inspect.");
+  const handleInspectSelected = async () => {
+    if (selectedUrls.length === 0) {
+      alert("No URLs selected to inspect.");
       return;
     }
 
-    if (urlsToInspect.length > 50) {
+    if (selectedUrls.length > 50) {
       alert("To avoid Google rate limits, please inspect less than 50 URLs at a time.");
       return;
     }
 
     setIsInspecting(true);
 
-    // Initialize state with 'checking' status for all
-    const initialAnalysis = urlsToInspect.map(url => ({ url, status: 'checking' as const }));
-    setBulkAnalysis(initialAnalysis);
+    setUrlAnalyses(prev => {
+      const next = { ...prev };
+      for (const url of selectedUrls) {
+        next[url] = { status: 'checking' };
+      }
+      return next;
+    });
 
     try {
-      // Create a copy we can mutate
-      let currentAnalysis = [...initialAnalysis];
-
-      // We make requests sequentially (with small delays) to avoid hitting GSC quotas (QPS limit is usually ~5)
-      for (let i = 0; i < urlsToInspect.length; i++) {
-        const targetUrl = urlsToInspect[i];
+      for (let i = 0; i < selectedUrls.length; i++) {
+        const targetUrl = selectedUrls[i];
 
         try {
           const res = await fetch('/api/gsc/inspect', {
@@ -213,31 +162,29 @@ export default function Dashboard() {
           if (!res.ok) throw new Error("API Error");
           const data = await res.json();
 
-          // Update state incrementally
-          currentAnalysis[i] = {
-            url: targetUrl,
-            status: 'done' as const,
-            isIndexed: data.isIndexed,
-            coverageState: data.coverageState
-          };
-
-          setBulkAnalysis([...currentAnalysis]);
+          setUrlAnalyses(prev => ({
+            ...prev,
+            [targetUrl]: {
+              status: 'done',
+              isIndexed: data.isIndexed,
+              coverageState: data.coverageState
+            }
+          }));
 
         } catch (e) {
-          currentAnalysis[i] = {
-            url: targetUrl,
-            status: 'error' as const,
-            coverageState: 'Inspection Failed'
-          };
-          setBulkAnalysis([...currentAnalysis]);
+          setUrlAnalyses(prev => ({
+            ...prev,
+            [targetUrl]: {
+              status: 'error',
+              coverageState: 'Inspection Failed'
+            }
+          }));
         }
 
-        // 500ms delay between inspections to be safe
-        if (i < urlsToInspect.length - 1) {
+        if (i < selectedUrls.length - 1) {
           await new Promise(r => setTimeout(r, 500));
         }
       }
-
     } catch (e) {
       console.error("Inspection error", e);
       alert("A general error occurred during inspection.");
@@ -246,9 +193,24 @@ export default function Dashboard() {
     }
   };
 
+  const toggleUrlSelection = (url: string) => {
+    if (selectedUrls.includes(url)) {
+      setSelectedUrls(prev => prev.filter(u => u !== url));
+    } else {
+      setSelectedUrls(prev => [...prev, url]);
+    }
+  };
+
+  const handleSelectAll = (checked: boolean) => {
+    if (checked) {
+      setSelectedUrls([...urls]);
+    } else {
+      setSelectedUrls([]);
+    }
+  };
+
   return (
     <div className="min-h-screen bg-[#050505] text-slate-200 font-sans selection:bg-indigo-500/30">
-      {/* Premium Header */}
       <header className="sticky top-0 z-50 border-b border-indigo-500/10 bg-black/40 backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -292,7 +254,6 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* Main Content Area */}
       <main className="max-w-7xl mx-auto px-6 py-12">
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 mb-12">
           <div>
@@ -309,203 +270,132 @@ export default function Dashboard() {
           <div className="rounded-2xl border border-indigo-500/20 bg-gradient-to-b from-indigo-500/5 to-transparent p-12 backdrop-blur-sm flex flex-col items-center text-center mt-12">
             <ShieldCheck className="w-16 h-16 text-indigo-400 mb-6" />
             <h2 className="text-2xl font-bold text-white mb-4">Connect Your Search Console</h2>
-            <p className="text-slate-400 max-w-lg mb-8">
-              Sign in with your Google Account to automatically pull your verified properties and start indexing pages immediately.
-            </p>
             <button
               onClick={() => signIn('google')}
-              className="px-8 py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl transition-colors shadow-lg shadow-indigo-500/25 flex items-center justify-center gap-3 text-lg"
+              className="px-8 py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl mt-6 flex items-center gap-3"
             >
-              Sign in with Google
-              <ArrowRight className="w-5 h-5" />
+              Sign in with Google <ArrowRight className="w-5 h-5" />
             </button>
           </div>
         ) : selectedSite ? (
-          /* URLs View */
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
-              <button
-                onClick={() => setSelectedSite(null)}
-                className="text-sm text-indigo-400 hover:text-indigo-300 flex items-center gap-2"
-              >
-                <ArrowRight className="w-4 h-4 rotate-180" /> Back to Properties
-              </button>
+            <button
+              onClick={() => setSelectedSite(null)}
+              className="mb-8 text-sm text-indigo-400 hover:text-indigo-300 flex items-center gap-2"
+            >
+              <ArrowRight className="w-4 h-4 rotate-180" /> Back to Properties
+            </button>
 
-              {/* View Toggles */}
-              <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-1">
-                <button
-                  onClick={() => setActiveTab('sitemap')}
-                  className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${activeTab === 'sitemap' ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-400 hover:text-slate-200'}`}
-                >
-                  From Sitemap
-                </button>
-                <button
-                  onClick={() => setActiveTab('bulk')}
-                  className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${activeTab === 'bulk' ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-400 hover:text-slate-200'}`}
-                >
-                  Bulk Paste
-                </button>
+            {isLoadingUrls ? (
+              <div className="p-12 border border-dashed border-slate-700 rounded-2xl flex flex-col items-center justify-center text-slate-500">
+                <Loader2 className="w-8 h-8 animate-spin mb-4 text-indigo-500" />
+                <p>Fetching sitemaps and URLs from Google...</p>
               </div>
-            </div>
-
-            {activeTab === 'sitemap' ? (
-              isLoadingUrls ? (
-                <div className="p-12 border border-dashed border-slate-700 rounded-2xl flex flex-col items-center justify-center text-slate-500">
-                  <Loader2 className="w-8 h-8 animate-spin mb-4 text-indigo-500" />
-                  <p>Fetching sitemaps and URLs from Google...</p>
-                </div>
-              ) : urls.length > 0 ? (
-                <div className="bg-[#0a0a0a] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-                  <div className="p-4 border-b border-slate-800 bg-black/40 flex justify-between items-center">
-                    <span className="font-medium text-slate-300">Found {urls.length} URLs in Sitemap</span>
+            ) : urls.length > 0 ? (
+              <div className="bg-[#0a0a0a] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+                <div className="p-4 border-b border-slate-800 bg-black/40 flex justify-between items-center sm:flex-row flex-col gap-4">
+                  <div className="flex items-center gap-4">
+                    <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-300 font-medium bg-white/5 py-1.5 px-3 rounded-lg hover:bg-white/10 transition-colors">
+                      <input
+                        type="checkbox"
+                        checked={selectedUrls.length === urls.length && urls.length > 0}
+                        onChange={(e) => handleSelectAll(e.target.checked)}
+                        className="rounded border-slate-600 bg-black/50 text-indigo-500 focus:ring-indigo-500/50 w-4 h-4"
+                      />
+                      {selectedUrls.length === urls.length ? 'Deselect All' : 'Select All'} ({selectedUrls.length}/{urls.length})
+                    </label>
                   </div>
-                  <ul className="divide-y divide-slate-800/50 max-h-[600px] overflow-y-auto">
-                    {urls.map((url, i) => (
-                      <li key={i} className="p-4 hover:bg-slate-900/50 flex flex-col lg:flex-row lg:items-center justify-between gap-4 transition-colors">
-                        <div className="flex items-center gap-3 overflow-hidden text-ellipsis">
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      onClick={handleInspectSelected}
+                      disabled={isInspecting || selectedUrls.length === 0}
+                      className="px-4 py-2 text-sm font-medium rounded-lg bg-slate-800 border border-slate-700 hover:bg-slate-700 transition-colors flex items-center gap-2 text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isInspecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4 text-slate-300" />}
+                      Test Google Indexing
+                    </button>
+                    <button
+                      onClick={() => submitIndexing(selectedUrls, 'gsc')}
+                      disabled={isSubmitting || selectedUrls.length === 0}
+                      className="px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 border border-indigo-500 hover:bg-indigo-500 transition-colors flex items-center gap-2 text-white disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-indigo-500/20"
+                    >
+                      <Globe className="w-4 h-4" />
+                      Bulk GSC Index
+                    </button>
+                    <button
+                      onClick={() => submitIndexing(selectedUrls, 'indexnow')}
+                      disabled={isSubmitting || selectedUrls.length === 0}
+                      className="px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 border border-emerald-500 hover:bg-emerald-500 transition-colors flex items-center gap-2 text-white disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-500/20"
+                    >
+                      <img src="https://www.bing.com/sa/simg/favicon-2x.ico" className="w-4 h-4 rounded-full" alt="Bing" />
+                      Bulk Bing Index
+                    </button>
+                  </div>
+                </div>
+
+                <ul className="divide-y divide-slate-800/50 max-h-[700px] overflow-y-auto">
+                  {urls.map((url, i) => {
+                    const isSelected = selectedUrls.includes(url);
+                    const analysis = urlAnalyses[url];
+
+                    return (
+                      <li key={i} className={`p-4 hover:bg-slate-900/50 flex flex-col lg:flex-row lg:items-center justify-between gap-4 transition-colors ${isSelected ? 'bg-indigo-950/20' : ''}`}>
+                        <div className="flex items-center gap-3 overflow-hidden text-ellipsis flex-1">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleUrlSelection(url)}
+                            className="rounded border-slate-600 bg-black/50 text-indigo-500 focus:ring-indigo-500/50 w-4 h-4 cursor-pointer"
+                          />
                           <Link className="w-4 h-4 text-slate-500 shrink-0" />
                           <span className="text-sm text-slate-300 truncate" title={url}>{url}</span>
                         </div>
-                        <div className="flex gap-2 shrink-0">
-                          <button
-                            onClick={() => submitIndexing(url, 'gsc')}
-                            disabled={isSubmitting}
-                            className="px-4 py-2 text-xs font-medium rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors flex items-center gap-2"
-                          >
-                            <Send className="w-3 h-3" />
-                            GSC Index
-                          </button>
-                          <button
-                            onClick={() => submitIndexing(url, 'indexnow')}
-                            disabled={isSubmitting}
-                            className="px-4 py-2 text-xs font-medium rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors flex items-center gap-2"
-                          >
-                            <Send className="w-3 h-3" />
-                            Bing IndexNow
-                          </button>
+
+                        <div className="flex items-center gap-4 shrink-0 justify-end w-full lg:w-auto mt-2 lg:mt-0">
+                          {/* Status Display */}
+                          {analysis && (
+                            <div className="flex items-center text-xs w-[120px] justify-start lg:justify-end">
+                              {analysis.status === 'checking' ? (
+                                <span className="text-indigo-400 flex items-center gap-1"><Loader2 className="w-3 h-3 animate-spin" /> Testing...</span>
+                              ) : analysis.isIndexed ? (
+                                <span className="text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded flex items-center gap-1 border border-emerald-500/20"><CheckCircle2 className="w-3 h-3" /> Indexed</span>
+                              ) : (
+                                <span className="text-amber-500 bg-amber-500/10 px-2 py-1 rounded flex items-center gap-1 border border-amber-500/20" title={analysis.coverageState}><AlertCircle className="w-3 h-3" /> Not Indexed</span>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Individual Actions */}
+                          <div className="flex gap-2 shrink-0">
+                            <button
+                              onClick={() => submitIndexing([url], 'gsc')}
+                              disabled={isSubmitting}
+                              className="px-4 py-2 text-xs font-medium rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors flex items-center gap-2 min-w-[120px] justify-center"
+                            >
+                              <Send className="w-3 h-3" />
+                              {analysis?.isIndexed ? 'Index Again' : 'GSC Index Now'}
+                            </button>
+                            <button
+                              onClick={() => submitIndexing([url], 'indexnow')}
+                              disabled={isSubmitting}
+                              className="px-4 py-2 text-xs font-medium rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors flex items-center gap-2 min-w-[100px] justify-center"
+                            >
+                              <img src="https://www.bing.com/sa/simg/favicon-2x.ico" className="w-3 h-3 rounded-full opacity-70" alt="Bing" />
+                              Bing Index
+                            </button>
+                          </div>
                         </div>
                       </li>
-                    ))}
-                  </ul>
-                </div>
-              ) : (
-                <div className="p-12 border border-dashed border-slate-700 rounded-2xl flex flex-col items-center justify-center text-slate-500 bg-black/20">
-                  <AlertCircle className="w-8 h-8 mb-4 text-amber-500/70" />
-                  <p className="font-medium text-slate-300">No URLs Found</p>
-                  <p className="text-sm mt-2 text-center max-w-md">We couldn't find a valid sitemap for this property in Google Search Console, or the sitemap is empty.</p>
-                </div>
-              )
+                    )
+                  })}
+                </ul>
+              </div>
             ) : (
-              /* Bulk Paste View */
-              <div className="bg-[#0a0a0a] border border-slate-800 rounded-2xl p-6 shadow-xl space-y-6">
-                <div className="flex items-center justify-between mb-2">
-                  <h3 className="font-medium text-slate-200">Manual URL Submission & Inspection</h3>
-                  <span className="text-xs text-slate-500">Google allows up to 200 URLs per day per property</span>
-                </div>
-
-                {bulkUrlsText.trim() === '' || !bulkAnalysis ? (
-                  /* Input View */
-                  <>
-                    <textarea
-                      value={bulkUrlsText}
-                      onChange={(e) => {
-                        setBulkUrlsText(e.target.value);
-                        setBulkAnalysis(null);
-                      }}
-                      placeholder={`Paste your URLs here, one per line.\n\nExample:\nhttps://${selectedSite?.replace('sc-domain:', '') || 'example.com'}/new-blog-post\nhttps://${selectedSite?.replace('sc-domain:', '') || 'example.com'}/about-us`}
-                      className="w-full h-64 bg-black/50 border border-slate-700 rounded-xl p-4 text-sm text-slate-300 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
-                    />
-
-                    <div className="flex justify-between items-center">
-                      <div className="text-sm text-slate-400">
-                        <span className="text-indigo-400 font-medium">{bulkUrlsText.split('\n').filter(u => u.trim() !== '' && u.startsWith('http')).length}</span> valid URLs detected
-                      </div>
-                      <button
-                        onClick={handleBulkInspect}
-                        disabled={isInspecting || bulkUrlsText.trim() === ''}
-                        className="px-6 py-2.5 text-sm font-medium rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        {isInspecting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
-                        {isInspecting ? 'Inspecting Google Status...' : 'Check Index Status'}
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  /* Results View */
-                  <div className="animate-in fade-in slide-in-from-bottom-4 duration-300">
-                    <div className="flex items-center justify-between mb-4 border-b border-slate-800 pb-4">
-                      <div className="flex gap-4">
-                        <div className="text-sm">
-                          <span className="text-slate-500">Total: </span>
-                          <span className="text-slate-200 font-medium">{bulkAnalysis.length}</span>
-                        </div>
-                        <div className="text-sm">
-                          <span className="text-slate-500">Indexed: </span>
-                          <span className="text-emerald-400 font-medium">{bulkAnalysis.filter(a => a.isIndexed).length}</span>
-                        </div>
-                        <div className="text-sm">
-                          <span className="text-slate-500">Not Indexed: </span>
-                          <span className="text-amber-400 font-medium">{bulkAnalysis.filter(a => a.status === 'done' && !a.isIndexed).length}</span>
-                        </div>
-                      </div>
-                      <button
-                        onClick={() => setBulkAnalysis(null)}
-                        className="text-xs text-indigo-400 hover:text-indigo-300"
-                      >
-                        Start Over
-                      </button>
-                    </div>
-
-                    <div className="max-h-[400px] overflow-y-auto mb-6 pr-2">
-                      <ul className="space-y-2">
-                        {bulkAnalysis.map((item, i) => (
-                          <li key={i} className="p-3 bg-black/40 border border-slate-800 rounded-lg flex justify-between items-center">
-                            <div className="flex items-center gap-3 overflow-hidden">
-                              {item.status === 'checking' ? (
-                                <Loader2 className="w-4 h-4 text-indigo-500 animate-spin shrink-0" />
-                              ) : item.isIndexed ? (
-                                <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-                              ) : (
-                                <AlertCircle className="w-4 h-4 text-amber-500 shrink-0" />
-                              )}
-                              <span className={`text-sm truncate ${item.isIndexed === false ? 'text-slate-200 font-medium' : 'text-slate-400'}`} title={item.url}>
-                                {item.url}
-                              </span>
-                            </div>
-                            <div className="shrink-0 text-xs text-right ml-4">
-                              {item.status === 'checking' ? (
-                                <span className="text-indigo-400">Checking...</span>
-                              ) : item.isIndexed ? (
-                                <span className="text-emerald-500 bg-emerald-500/10 px-2 py-1 rounded">Indexed</span >
-                              ) : (
-                                <span className="text-amber-500 bg-amber-500/10 px-2 py-1 rounded">{item.coverageState || 'Not Indexed'}</span>
-                              )}
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-
-                    <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
-                      <button
-                        onClick={() => handleBulkSubmit('indexnow', true)}
-                        disabled={isSubmitting || bulkAnalysis.filter(a => a.status === 'done' && !a.isIndexed).length === 0}
-                        className="px-6 py-2.5 text-sm font-medium rounded-xl bg-emerald-600/20 text-emerald-500 hover:bg-emerald-600/30 border border-emerald-500/20 transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        <img src="https://www.bing.com/sa/simg/favicon-2x.ico" className="w-4 h-4 rounded-full opacity-70" alt="Bing" />
-                        Bing ({bulkAnalysis.filter(a => a.status === 'done' && !a.isIndexed).length} Unindexed)
-                      </button>
-                      <button
-                        onClick={() => handleBulkSubmit('gsc', true)}
-                        disabled={isSubmitting || bulkAnalysis.filter(a => a.status === 'done' && !a.isIndexed).length === 0}
-                        className="px-6 py-2.5 text-sm font-medium rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-colors flex items-center gap-2 disabled:opacity-50 shadow-lg shadow-indigo-500/20 disabled:cursor-not-allowed"
-                      >
-                        <Globe className="w-4 h-4" />
-                        {isSubmitting ? 'Submitting...' : `Google (${bulkAnalysis.filter(a => a.status === 'done' && !a.isIndexed).length} Unindexed)`}
-                      </button>
-                    </div>
-                  </div>
-                )}
+              <div className="p-12 border border-dashed border-slate-700 rounded-2xl flex flex-col items-center justify-center text-slate-500 bg-black/20">
+                <AlertCircle className="w-8 h-8 mb-4 text-amber-500/70" />
+                <p className="font-medium text-slate-300">No URLs Found</p>
+                <p className="text-sm mt-2 text-center max-w-md">We couldn't find a valid sitemap for this property in Google Search Console.</p>
               </div>
             )}
           </div>
@@ -532,22 +422,7 @@ export default function Dashboard() {
                           <h3 className="font-medium text-slate-200 truncate pr-2" title={site.siteUrl}>
                             {site.siteUrl.replace('https://', '').replace(/\/$/, '') || site.siteUrl}
                           </h3>
-                          <div className="flex items-center gap-1.5 mt-1">
-                            <ShieldCheck className="w-3.5 h-3.5 text-emerald-500" />
-                            <span className="text-xs text-emerald-500">GSC Verified Entry</span>
-                          </div>
                         </div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4 mb-6">
-                      <div className="p-3 rounded-lg bg-black/40 border border-slate-800/50">
-                        <p className="text-xs text-slate-500 mb-1">Permission Level</p>
-                        <p className="font-medium text-slate-300 capitalize">{site.permissionLevel.toLowerCase()}</p>
-                      </div>
-                      <div className="p-3 rounded-lg bg-black/40 border border-slate-800/50">
-                        <p className="text-xs text-slate-500 mb-1">URL Prefix</p>
-                        <p className="font-medium text-slate-300">{site.siteUrl.startsWith('sc-domain:') ? 'Domain Prop.' : 'URL Prefix'}</p>
                       </div>
                     </div>
 
@@ -555,7 +430,7 @@ export default function Dashboard() {
                       onClick={() => fetchUrlsForSite(site.siteUrl)}
                       className="w-full py-2.5 rounded-lg text-sm font-medium transition-colors border border-indigo-500/30 bg-indigo-500/10 text-indigo-400 hover:bg-indigo-500/20 flex flex-row items-center justify-center gap-2"
                     >
-                      Fetch URLs <ArrowRight className="w-4 h-4" />
+                      Fetch Sitemap URLs <ArrowRight className="w-4 h-4" />
                     </button>
                   </div>
                 ))}
@@ -564,7 +439,6 @@ export default function Dashboard() {
               <div className="p-12 border border-dashed border-slate-700 rounded-2xl flex flex-col items-center justify-center text-slate-500 bg-black/20">
                 <AlertCircle className="w-8 h-8 mb-4 text-amber-500/70" />
                 <p className="font-medium text-slate-300">No Verified Properties Found</p>
-                <p className="text-sm mt-2 text-center max-w-md">There are no properties verified in the Google Search Console account you logged in with. Please log in with the account that owns the domains.</p>
               </div>
             )}
           </>
