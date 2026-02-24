@@ -15,6 +15,9 @@ export default function Dashboard() {
   const [isLoadingUrls, setIsLoadingUrls] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const [activeTab, setActiveTab] = useState<'sitemap' | 'bulk'>('sitemap');
+  const [bulkUrlsText, setBulkUrlsText] = useState("");
+
   // Fetch sites when user authenticates
   useEffect(() => {
     if (status === "authenticated") {
@@ -90,6 +93,70 @@ export default function Dashboard() {
       }
     } catch (e) {
       alert("Failed to submit for indexing. See console.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleBulkSubmit = async (type: 'gsc' | 'indexnow') => {
+    const urlsToSubmit = bulkUrlsText
+      .split('\n')
+      .map(u => u.trim())
+      .filter(u => u !== '' && u.startsWith('http'));
+
+    if (urlsToSubmit.length === 0) {
+      alert("No valid URLs found. Please ensure each line starts with http:// or https://");
+      return;
+    }
+
+    if (urlsToSubmit.length > 200) {
+      alert("Google allows a maximum of 200 indexing requests per day. Please reduce your list.");
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      let successCount = 0;
+
+      if (type === 'indexnow') {
+        // IndexNow accepts bulk URLs natively in one payload!
+        // Group by host in case user pasted multiple domains
+        const hostGroups: { [key: string]: string[] } = {};
+        for (const u of urlsToSubmit) {
+          const host = new URL(u).host;
+          if (!hostGroups[host]) hostGroups[host] = [];
+          hostGroups[host].push(u);
+        }
+
+        for (const host of Object.keys(hostGroups)) {
+          await fetch('/api/indexnow', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ host, key: "example-verification-key", urls: hostGroups[host] })
+          });
+        }
+        alert(`Successfully sent ${urlsToSubmit.length} URLs to IndexNow!`);
+        setBulkUrlsText("");
+      } else {
+        // GSC API currently requires 1 API call per URL for indexing endpoint
+        for (let i = 0; i < urlsToSubmit.length; i++) {
+          const targetUrl = urlsToSubmit[i];
+          await fetch('/api/gsc', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: targetUrl, type: 'URL_UPDATED' })
+          });
+          successCount++;
+
+          // Very small artificial delay to avoid hitting Google's rate limits instantly
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+        alert(`Successfully submitted ${successCount} URLs to Google Search Console for indexing!`);
+        if (successCount === urlsToSubmit.length) setBulkUrlsText("");
+      }
+    } catch (e) {
+      console.error(e);
+      alert("An error occurred during bulk submission. Re-check the console.");
     } finally {
       setIsSubmitting(false);
     }
@@ -172,57 +239,116 @@ export default function Dashboard() {
         ) : selectedSite ? (
           /* URLs View */
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
-            <button
-              onClick={() => setSelectedSite(null)}
-              className="mb-6 text-sm text-indigo-400 hover:text-indigo-300 flex items-center gap-2"
-            >
-              <ArrowRight className="w-4 h-4 rotate-180" /> Back to Properties
-            </button>
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 mb-6">
+              <button
+                onClick={() => setSelectedSite(null)}
+                className="text-sm text-indigo-400 hover:text-indigo-300 flex items-center gap-2"
+              >
+                <ArrowRight className="w-4 h-4 rotate-180" /> Back to Properties
+              </button>
 
-            {isLoadingUrls ? (
-              <div className="p-12 border border-dashed border-slate-700 rounded-2xl flex flex-col items-center justify-center text-slate-500">
-                <Loader2 className="w-8 h-8 animate-spin mb-4 text-indigo-500" />
-                <p>Fetching sitemaps and URLs from Google...</p>
+              {/* View Toggles */}
+              <div className="flex bg-slate-900 border border-slate-800 rounded-lg p-1">
+                <button
+                  onClick={() => setActiveTab('sitemap')}
+                  className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${activeTab === 'sitemap' ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-400 hover:text-slate-200'}`}
+                >
+                  From Sitemap
+                </button>
+                <button
+                  onClick={() => setActiveTab('bulk')}
+                  className={`px-4 py-1.5 text-sm font-medium rounded-md transition-colors ${activeTab === 'bulk' ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-400 hover:text-slate-200'}`}
+                >
+                  Bulk Paste
+                </button>
               </div>
-            ) : urls.length > 0 ? (
-              <div className="bg-[#0a0a0a] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
-                <div className="p-4 border-b border-slate-800 bg-black/40 flex justify-between items-center">
-                  <span className="font-medium text-slate-300">Found {urls.length} URLs in Sitemap</span>
+            </div>
+
+            {activeTab === 'sitemap' ? (
+              isLoadingUrls ? (
+                <div className="p-12 border border-dashed border-slate-700 rounded-2xl flex flex-col items-center justify-center text-slate-500">
+                  <Loader2 className="w-8 h-8 animate-spin mb-4 text-indigo-500" />
+                  <p>Fetching sitemaps and URLs from Google...</p>
                 </div>
-                <ul className="divide-y divide-slate-800/50 max-h-[600px] overflow-y-auto">
-                  {urls.map((url, i) => (
-                    <li key={i} className="p-4 hover:bg-slate-900/50 flex flex-col lg:flex-row lg:items-center justify-between gap-4 transition-colors">
-                      <div className="flex items-center gap-3 overflow-hidden text-ellipsis">
-                        <Link className="w-4 h-4 text-slate-500 shrink-0" />
-                        <span className="text-sm text-slate-300 truncate" title={url}>{url}</span>
-                      </div>
-                      <div className="flex gap-2 shrink-0">
-                        <button
-                          onClick={() => submitIndexing(url, 'gsc')}
-                          disabled={isSubmitting}
-                          className="px-4 py-2 text-xs font-medium rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors flex items-center gap-2"
-                        >
-                          <Send className="w-3 h-3" />
-                          GSC Index
-                        </button>
-                        <button
-                          onClick={() => submitIndexing(url, 'indexnow')}
-                          disabled={isSubmitting}
-                          className="px-4 py-2 text-xs font-medium rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors flex items-center gap-2"
-                        >
-                          <Send className="w-3 h-3" />
-                          Bing IndexNow
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+              ) : urls.length > 0 ? (
+                <div className="bg-[#0a0a0a] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+                  <div className="p-4 border-b border-slate-800 bg-black/40 flex justify-between items-center">
+                    <span className="font-medium text-slate-300">Found {urls.length} URLs in Sitemap</span>
+                  </div>
+                  <ul className="divide-y divide-slate-800/50 max-h-[600px] overflow-y-auto">
+                    {urls.map((url, i) => (
+                      <li key={i} className="p-4 hover:bg-slate-900/50 flex flex-col lg:flex-row lg:items-center justify-between gap-4 transition-colors">
+                        <div className="flex items-center gap-3 overflow-hidden text-ellipsis">
+                          <Link className="w-4 h-4 text-slate-500 shrink-0" />
+                          <span className="text-sm text-slate-300 truncate" title={url}>{url}</span>
+                        </div>
+                        <div className="flex gap-2 shrink-0">
+                          <button
+                            onClick={() => submitIndexing(url, 'gsc')}
+                            disabled={isSubmitting}
+                            className="px-4 py-2 text-xs font-medium rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 hover:bg-indigo-500/20 transition-colors flex items-center gap-2"
+                          >
+                            <Send className="w-3 h-3" />
+                            GSC Index
+                          </button>
+                          <button
+                            onClick={() => submitIndexing(url, 'indexnow')}
+                            disabled={isSubmitting}
+                            className="px-4 py-2 text-xs font-medium rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 hover:bg-emerald-500/20 transition-colors flex items-center gap-2"
+                          >
+                            <Send className="w-3 h-3" />
+                            Bing IndexNow
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <div className="p-12 border border-dashed border-slate-700 rounded-2xl flex flex-col items-center justify-center text-slate-500 bg-black/20">
+                  <AlertCircle className="w-8 h-8 mb-4 text-amber-500/70" />
+                  <p className="font-medium text-slate-300">No URLs Found</p>
+                  <p className="text-sm mt-2 text-center max-w-md">We couldn't find a valid sitemap for this property in Google Search Console, or the sitemap is empty.</p>
+                </div>
+              )
             ) : (
-              <div className="p-12 border border-dashed border-slate-700 rounded-2xl flex flex-col items-center justify-center text-slate-500 bg-black/20">
-                <AlertCircle className="w-8 h-8 mb-4 text-amber-500/70" />
-                <p className="font-medium text-slate-300">No URLs Found</p>
-                <p className="text-sm mt-2 text-center max-w-md">We couldn't find a valid sitemap for this property in Google Search Console, or the sitemap is empty.</p>
+              /* Bulk Paste View */
+              <div className="bg-[#0a0a0a] border border-slate-800 rounded-2xl p-6 shadow-xl space-y-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="font-medium text-slate-200">Manual URL Submission</h3>
+                  <span className="text-xs text-slate-500">Google allows up to 200 URLs per day per property</span>
+                </div>
+
+                <textarea
+                  value={bulkUrlsText}
+                  onChange={(e) => setBulkUrlsText(e.target.value)}
+                  placeholder={`Paste your URLs here, one per line.\n\nExample:\nhttps://${selectedSite?.replace('sc-domain:', '') || 'example.com'}/new-blog-post\nhttps://${selectedSite?.replace('sc-domain:', '') || 'example.com'}/about-us`}
+                  className="w-full h-64 bg-black/50 border border-slate-700 rounded-xl p-4 text-sm text-slate-300 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500/50"
+                />
+
+                <div className="flex justify-between items-center pt-2">
+                  <div className="text-sm text-slate-400">
+                    <span className="text-indigo-400 font-medium">{bulkUrlsText.split('\n').filter(u => u.trim() !== '').length}</span> URLs detected
+                  </div>
+                  <div className="flex gap-3">
+                    <button
+                      onClick={() => handleBulkSubmit('indexnow')}
+                      disabled={isSubmitting || bulkUrlsText.trim() === ''}
+                      className="px-6 py-2.5 text-sm font-medium rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-colors flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <img src="https://www.bing.com/sa/simg/favicon-2x.ico" className="w-4 h-4 rounded-full" alt="Bing" />
+                      Bulk Bing Index
+                    </button>
+                    <button
+                      onClick={() => handleBulkSubmit('gsc')}
+                      disabled={isSubmitting || bulkUrlsText.trim() === ''}
+                      className="px-6 py-2.5 text-sm font-medium rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white transition-colors flex items-center gap-2 disabled:opacity-50 shadow-lg shadow-indigo-500/20 disabled:cursor-not-allowed"
+                    >
+                      <Globe className="w-4 h-4" />
+                      {isSubmitting ? 'Submitting...' : 'Bulk Google Index'}
+                    </button>
+                  </div>
+                </div>
               </div>
             )}
           </div>
