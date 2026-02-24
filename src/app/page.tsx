@@ -238,9 +238,9 @@ export default function Dashboard() {
               <div className="animate-in fade-in slide-in-from-bottom-4 duration-500 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {sites.map((site, i) => (
                   <div key={i} className="group relative rounded-2xl border border-slate-800 bg-[#0a0a0a] p-6 hover:bg-[#111] hover:border-slate-700 transition-all duration-300 overflow-hidden shadow-xl">
-                    <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/0 via-transparent to-purple-500/0 group-hover:from-indigo-500/5 group-hover:to-purple-500/5 transition-all opacity-0 group-hover:opacity-100"></div>
+                    <div className="absolute inset-0 bg-gradient-to-br from-indigo-500/0 via-transparent to-purple-500/0 group-hover:from-indigo-500/5 group-hover:to-purple-500/5 transition-all opacity-0 group-hover:opacity-100 pointer-events-none z-0"></div>
 
-                    <div className="flex justify-between items-start mb-6 drop-shadow">
+                    <div className="relative z-10 flex justify-between items-start mb-6 drop-shadow">
                       <div className="flex items-center gap-3 max-w-full">
                         <div className="w-10 h-10 shrink-0 rounded-full bg-slate-800/80 flex items-center justify-center border border-slate-700">
                           <Globe className="w-5 h-5 text-indigo-400" />
