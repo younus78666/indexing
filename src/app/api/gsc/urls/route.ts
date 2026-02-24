@@ -50,18 +50,34 @@ export async function GET(request: Request) {
             return NextResponse.json({ error: 'Invalid sitemap path' }, { status: 500 });
         }
 
+        const parser = new xml2js.Parser();
+
+        // Helper function to fetch and parse a single sitemap XML
+        const fetchSitemapUrls = async (url: string): Promise<string[]> => {
+            try {
+                const res = await fetch(url);
+                if (!res.ok) return [];
+                const txt = await res.text();
+                const result = await parser.parseStringPromise(txt);
+
+                if (result.urlset && result.urlset.url) {
+                    return result.urlset.url.map((u: any) => u.loc[0]);
+                }
+                return [];
+            } catch (e) {
+                return [];
+            }
+        };
+
+        let extractedUrls: string[] = [];
+
         const xmlResponse = await fetch(targetSitemapPath);
         if (!xmlResponse.ok) {
             return NextResponse.json({ error: `Failed to fetch sitemap XML from ${targetSitemapPath}` }, { status: 500 });
         }
 
         const xmlText = await xmlResponse.text();
-
-        // 3. Parse the XML to extract URLs
-        const parser = new xml2js.Parser();
         const result = await parser.parseStringPromise(xmlText);
-
-        let extractedUrls: string[] = [];
 
         // Basic sitemap structure <urlset><url><loc>...</loc></url></urlset>
         if (result.urlset && result.urlset.url) {
@@ -69,9 +85,18 @@ export async function GET(request: Request) {
         }
         // Sitemap index structure <sitemapindex><sitemap><loc>...</loc></sitemap></sitemapindex>
         else if (result.sitemapindex && result.sitemapindex.sitemap) {
-            // If it's an index, we just return the sitemaps for now (handling nested is complex for a v1)
-            // We'll just return the sub-sitemaps as URLs for the user to see, or we could fetch them recursively.
-            extractedUrls = result.sitemapindex.sitemap.map((s: any) => s.loc[0]);
+            const subSitemaps = result.sitemapindex.sitemap.map((s: any) => s.loc[0]);
+
+            // Max out at 5 sub-sitemaps to prevent Vercel timeouts for huge sites
+            const sitemapsToFetch = subSitemaps.slice(0, 5);
+
+            const allUrlsPromises = sitemapsToFetch.map(fetchSitemapUrls);
+            const urlsArrays = await Promise.all(allUrlsPromises);
+
+            extractedUrls = urlsArrays.flat();
+
+            // Remove duplicates
+            extractedUrls = Array.from(new Set(extractedUrls));
         }
 
         return NextResponse.json({
