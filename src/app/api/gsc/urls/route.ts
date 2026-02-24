@@ -26,87 +26,202 @@ export async function GET(request: Request) {
             auth: oAuth2Client,
         });
 
-        // 1. Fetch the list of sitemaps for this site from GSC
-        const sitemapsResponse = await webmasters.sitemaps.list({
-            siteUrl: siteUrl,
-        });
-
-        const sitemaps = sitemapsResponse.data.sitemap || [];
-
-        if (sitemaps.length === 0) {
-            // If no sitemaps found in GSC, we could try a default ping, but let's notify the user
-            return NextResponse.json({
-                success: true,
-                urls: [],
-                message: 'No sitemaps found for this property in Google Search Console'
-            });
-        }
-
-        // 2. Fetch the XML content of the first sitemap (or all of them)
-        // For simplicity, we'll fetch the first sitemap found.
-        const targetSitemapPath = sitemaps[0].path;
-
-        if (!targetSitemapPath) {
-            return NextResponse.json({ error: 'Invalid sitemap path' }, { status: 500 });
-        }
-
-        const parser = new xml2js.Parser();
-
-        // Helper function to fetch and parse a single sitemap XML
-        const fetchSitemapUrls = async (url: string): Promise<string[]> => {
-            try {
-                const res = await fetch(url);
-                if (!res.ok) return [];
-                const txt = await res.text();
-                const result = await parser.parseStringPromise(txt);
-
-                if (result.urlset && result.urlset.url) {
-                    return result.urlset.url.map((u: any) => u.loc[0]);
-                }
-                return [];
-            } catch (e) {
-                return [];
-            }
-        };
-
         let extractedUrls: string[] = [];
+        let usedMethod = 'none';
 
-        const xmlResponse = await fetch(targetSitemapPath);
-        if (!xmlResponse.ok) {
-            return NextResponse.json({ error: `Failed to fetch sitemap XML from ${targetSitemapPath}` }, { status: 500 });
+        // ===== METHOD 1: Try fetching from registered sitemaps in GSC =====
+        try {
+            const sitemapsResponse = await webmasters.sitemaps.list({
+                siteUrl: siteUrl,
+            });
+
+            const sitemaps = sitemapsResponse.data.sitemap || [];
+
+            if (sitemaps.length > 0) {
+                const parser = new xml2js.Parser();
+
+                // Helper: fetch and parse a single sitemap XML with timeout
+                const fetchSitemapUrls = async (url: string): Promise<string[]> => {
+                    try {
+                        const controller = new AbortController();
+                        const timeoutId = setTimeout(() => controller.abort(), 8000); // 8s timeout
+
+                        const res = await fetch(url, { signal: controller.signal });
+                        clearTimeout(timeoutId);
+
+                        if (!res.ok) return [];
+                        const txt = await res.text();
+                        const result = await parser.parseStringPromise(txt);
+
+                        if (result.urlset && result.urlset.url) {
+                            return result.urlset.url.map((u: any) => u.loc[0]);
+                        }
+                        return [];
+                    } catch (e) {
+                        console.log(`Failed to fetch sitemap: ${url}`);
+                        return [];
+                    }
+                };
+
+                // Try ALL sitemaps (not just the first one), limited to 10 to avoid timeout
+                const sitemapPaths = sitemaps
+                    .map(s => s.path)
+                    .filter(Boolean)
+                    .slice(0, 10) as string[];
+
+                for (const sitemapPath of sitemapPaths) {
+                    try {
+                        const controller = new AbortController();
+                        const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+                        const xmlResponse = await fetch(sitemapPath, { signal: controller.signal });
+                        clearTimeout(timeoutId);
+
+                        if (!xmlResponse.ok) continue;
+
+                        const xmlText = await xmlResponse.text();
+                        const result = await parser.parseStringPromise(xmlText);
+
+                        // Regular sitemap: <urlset><url><loc>...</loc></url></urlset>
+                        if (result.urlset && result.urlset.url) {
+                            const urls = result.urlset.url.map((u: any) => u.loc[0]);
+                            extractedUrls.push(...urls);
+                        }
+                        // Sitemap index: <sitemapindex><sitemap><loc>...</loc></sitemap></sitemapindex>
+                        else if (result.sitemapindex && result.sitemapindex.sitemap) {
+                            const subSitemaps = result.sitemapindex.sitemap.map((s: any) => s.loc[0]);
+                            // Limit sub-sitemaps to prevent Vercel timeout
+                            const sitemapsToFetch = subSitemaps.slice(0, 5);
+                            const urlsArrays = await Promise.all(sitemapsToFetch.map(fetchSitemapUrls));
+                            extractedUrls.push(...urlsArrays.flat());
+                        }
+                    } catch (e) {
+                        console.log(`Sitemap parse failed for ${sitemapPath}, trying next...`);
+                        continue;
+                    }
+                }
+
+                // Deduplicate
+                extractedUrls = Array.from(new Set(extractedUrls));
+
+                if (extractedUrls.length > 0) {
+                    usedMethod = 'sitemap';
+                }
+            }
+        } catch (e: any) {
+            console.log('Sitemap method failed:', e.message);
         }
 
-        const xmlText = await xmlResponse.text();
-        const result = await parser.parseStringPromise(xmlText);
+        // ===== METHOD 2: Fallback to Search Analytics API if sitemaps yielded nothing =====
+        if (extractedUrls.length === 0) {
+            try {
+                const searchconsole = google.searchconsole({
+                    version: 'v1',
+                    auth: oAuth2Client,
+                });
 
-        // Basic sitemap structure <urlset><url><loc>...</loc></url></urlset>
-        if (result.urlset && result.urlset.url) {
-            extractedUrls = result.urlset.url.map((u: any) => u.loc[0]);
+                const analyticsResponse = await searchconsole.searchanalytics.query({
+                    siteUrl: siteUrl,
+                    requestBody: {
+                        startDate: getDateNDaysAgo(90), // Last 90 days
+                        endDate: getDateNDaysAgo(1),
+                        dimensions: ['page'],
+                        rowLimit: 500,
+                    },
+                });
+
+                const rows = analyticsResponse.data.rows || [];
+                if (rows.length > 0) {
+                    extractedUrls = rows.map((row: any) => row.keys[0]);
+                    usedMethod = 'searchAnalytics';
+                }
+            } catch (e: any) {
+                console.log('Search Analytics fallback also failed:', e.message);
+            }
         }
-        // Sitemap index structure <sitemapindex><sitemap><loc>...</loc></sitemap></sitemapindex>
-        else if (result.sitemapindex && result.sitemapindex.sitemap) {
-            const subSitemaps = result.sitemapindex.sitemap.map((s: any) => s.loc[0]);
 
-            // Max out at 5 sub-sitemaps to prevent Vercel timeouts for huge sites
-            const sitemapsToFetch = subSitemaps.slice(0, 5);
+        // ===== METHOD 3: Last resort - try common sitemap URL patterns directly =====
+        if (extractedUrls.length === 0) {
+            try {
+                // Extract the base domain URL from the siteUrl
+                let baseUrl = siteUrl;
+                if (baseUrl.startsWith('sc-domain:')) {
+                    baseUrl = `https://${baseUrl.replace('sc-domain:', '')}`;
+                }
+                // Remove trailing slash
+                baseUrl = baseUrl.replace(/\/$/, '');
 
-            const allUrlsPromises = sitemapsToFetch.map(fetchSitemapUrls);
-            const urlsArrays = await Promise.all(allUrlsPromises);
+                const commonSitemapPaths = [
+                    `${baseUrl}/sitemap.xml`,
+                    `${baseUrl}/sitemap_index.xml`,
+                    `${baseUrl}/post-sitemap.xml`,
+                    `${baseUrl}/page-sitemap.xml`,
+                ];
 
-            extractedUrls = urlsArrays.flat();
+                const parser = new xml2js.Parser();
 
-            // Remove duplicates
-            extractedUrls = Array.from(new Set(extractedUrls));
+                for (const url of commonSitemapPaths) {
+                    try {
+                        const controller = new AbortController();
+                        const timeoutId = setTimeout(() => controller.abort(), 6000);
+                        const res = await fetch(url, { signal: controller.signal });
+                        clearTimeout(timeoutId);
+
+                        if (!res.ok) continue;
+                        const txt = await res.text();
+                        const result = await parser.parseStringPromise(txt);
+
+                        if (result.urlset && result.urlset.url) {
+                            extractedUrls = result.urlset.url.map((u: any) => u.loc[0]);
+                            usedMethod = 'directSitemap';
+                            break;
+                        } else if (result.sitemapindex && result.sitemapindex.sitemap) {
+                            // Found a sitemap index, fetch first few sub-sitemaps
+                            const subUrls = result.sitemapindex.sitemap.map((s: any) => s.loc[0]).slice(0, 3);
+                            for (const subUrl of subUrls) {
+                                try {
+                                    const subRes = await fetch(subUrl);
+                                    if (!subRes.ok) continue;
+                                    const subTxt = await subRes.text();
+                                    const subResult = await parser.parseStringPromise(subTxt);
+                                    if (subResult.urlset && subResult.urlset.url) {
+                                        extractedUrls.push(...subResult.urlset.url.map((u: any) => u.loc[0]));
+                                    }
+                                } catch (e) { continue; }
+                            }
+                            if (extractedUrls.length > 0) {
+                                usedMethod = 'directSitemap';
+                                break;
+                            }
+                        }
+                    } catch (e) {
+                        continue;
+                    }
+                }
+
+                extractedUrls = Array.from(new Set(extractedUrls));
+            } catch (e: any) {
+                console.log('Direct sitemap fallback failed:', e.message);
+            }
         }
 
         return NextResponse.json({
             success: true,
-            sitemap: targetSitemapPath,
-            urls: extractedUrls
+            sitemap: usedMethod,
+            urls: extractedUrls,
+            message: extractedUrls.length === 0
+                ? 'No URLs could be fetched. The site may not have a sitemap, or it may not have appeared in search results in the last 90 days.'
+                : undefined,
         });
 
     } catch (error: any) {
         console.error('Sitemap Fetch Error:', error.message || error);
         return NextResponse.json({ error: error.message || 'Failed to fetch sitemap URLs' }, { status: 500 });
     }
+}
+
+function getDateNDaysAgo(n: number): string {
+    const d = new Date();
+    d.setDate(d.getDate() - n);
+    return d.toISOString().split('T')[0];
 }
