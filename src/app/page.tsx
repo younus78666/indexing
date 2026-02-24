@@ -42,13 +42,23 @@ export default function Dashboard() {
     setIsLoadingUrls(true);
     setUrls([]);
     try {
-      const res = await fetch(`/api/gsc/urls?siteUrl=${encodeURIComponent(siteUrl)}`);
+      // Fix for sc-domain: prefix which trips up some URL parsers if not fully encoded twice or handled properly
+      const queryParam = encodeURIComponent(siteUrl);
+      const res = await fetch(`/api/gsc/urls?siteUrl=${queryParam}`);
+
+      if (!res.ok) {
+        throw new Error(`API returned ${res.status}`);
+      }
+
       const data = await res.json();
       if (data.success && data.urls) {
         setUrls(data.urls);
+      } else {
+        alert(data.message || data.error || "No sitemaps found.");
       }
-    } catch (e) {
-      console.error(e);
+    } catch (e: any) {
+      console.error("Fetch URLs Error:", e);
+      alert("Failed to fetch URLs. Check console for error.");
     } finally {
       setIsLoadingUrls(false);
     }
