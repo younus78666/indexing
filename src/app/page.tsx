@@ -320,16 +320,16 @@ export default function Dashboard() {
                       disabled={isSubmitting || selectedUrls.length === 0}
                       className="px-4 py-2 text-sm font-medium rounded-lg bg-indigo-600 border border-indigo-500 hover:bg-indigo-500 transition-colors flex items-center gap-2 text-white disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-indigo-500/20"
                     >
-                      <Globe className="w-4 h-4" />
-                      Bulk GSC Index
+                      {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Globe className="w-4 h-4" />}
+                      {isSubmitting ? 'Submitting...' : 'Bulk GSC Index'}
                     </button>
                     <button
                       onClick={() => submitIndexing(selectedUrls, 'indexnow')}
                       disabled={isSubmitting || selectedUrls.length === 0}
                       className="px-4 py-2 text-sm font-medium rounded-lg bg-emerald-600 border border-emerald-500 hover:bg-emerald-500 transition-colors flex items-center gap-2 text-white disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-emerald-500/20"
                     >
-                      <img src="https://www.bing.com/sa/simg/favicon-2x.ico" className="w-4 h-4 rounded-full" alt="Bing" />
-                      Bulk Bing Index
+                      {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <img src="https://www.bing.com/sa/simg/favicon-2x.ico" className="w-4 h-4 rounded-full" alt="Bing" />}
+                      {isSubmitting ? 'Submitting...' : 'Bulk Bing Index'}
                     </button>
                   </div>
                 </div>
