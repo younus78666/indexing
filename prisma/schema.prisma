@@ -1,0 +1,125 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String         @id @default(uuid())
+  email         String         @unique
+  name          String?
+  image         String?
+  googleId      String?        @unique
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  
+  // Relations
+  subscription  Subscription?
+  usage         Usage?
+  sites         UserSite[]
+  indexingLogs  IndexingLog[]
+}
+
+model Subscription {
+  id                String   @id @default(uuid())
+  userId            String   @unique
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Stripe fields
+  stripeCustomerId  String?  @unique
+  stripeSubscriptionId String? @unique
+  stripePriceId     String?
+  
+  // Plan details
+  plan              Plan     @default(FREE)
+  status            SubscriptionStatus @default(INACTIVE)
+  
+  // Billing period
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  
+  // Timestamps
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([stripeCustomerId])
+  @@index([stripeSubscriptionId])
+}
+
+model Usage {
+  id                    String   @id @default(uuid())
+  userId                String   @unique
+  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  // Daily usage counters (reset daily)
+  gscRequestsToday      Int      @default(0)
+  indexNowRequestsToday Int      @default(0)
+  urlsIndexedToday      Int      @default(0)
+  
+  // Monthly counters for paid plans
+  gscRequestsThisMonth  Int      @default(0)
+  urlsIndexedThisMonth  Int      @default(0)
+  
+  // Last reset dates
+  lastResetDate         DateTime @default(now())
+  lastMonthlyReset      DateTime @default(now())
+  
+  // Total lifetime stats
+  totalUrlsIndexed      Int      @default(0)
+  totalGscRequests      Int      @default(0)
+  
+  updatedAt             DateTime @updatedAt
+}
+
+model UserSite {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  siteUrl   String
+  createdAt DateTime @default(now())
+  
+  @@unique([userId, siteUrl])
+  @@index([userId])
+}
+
+model IndexingLog {
+  id          String   @id @default(uuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  url         String
+  type        IndexingType
+  status      String   // success, error, pending
+  message     String?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([userId])
+  @@index([createdAt])
+}
+
+enum Plan {
+  FREE
+  STARTER
+  PRO
+  AGENCY
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELED
+  PAST_DUE
+  UNPAID
+  INACTIVE
+  TRIALING
+}
+
+enum IndexingType {
+  GSC
+  INDEXNOW
+  BULK_GSC
+  BULK_INDEXNOW
+}

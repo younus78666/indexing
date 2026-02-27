@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { useSession, signIn, signOut } from "next-auth/react";
-import { Search, Globe, Activity, ArrowRight, ShieldCheck, AlertCircle, CheckCircle2, LogOut, LogIn, Link, Loader2, Send, Zap, RefreshCw } from "lucide-react";
+import { Search, Globe, Activity, ArrowRight, ShieldCheck, AlertCircle, CheckCircle2, LogOut, LogIn, Link, Loader2, Send, Zap, RefreshCw, BarChart3, CreditCard } from "lucide-react";
 
 type UrlAnalysis = {
   status: 'checking' | 'done' | 'error';
@@ -10,8 +10,25 @@ type UrlAnalysis = {
   coverageState?: string;
 };
 
+interface UsageData {
+  usage: {
+    gscRequestsToday: number;
+    indexNowRequestsToday: number;
+    urlsIndexedToday: number;
+  };
+  limits: {
+    gscRequestsPerDay: number;
+    indexNowRequestsPerDay: number;
+    urlsPerBatch: number;
+    sites: number;
+    bulkIndexing: boolean;
+  };
+  plan: string;
+}
+
 export default function Dashboard() {
   const { data: session, status } = useSession();
+  const [usage, setUsage] = useState<UsageData | null>(null);
 
   // App Level State
   const [activeApp, setActiveApp] = useState<'console' | 'indexer'>('console');
@@ -28,6 +45,10 @@ export default function Dashboard() {
   const [isLoadingUrls, setIsLoadingUrls] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isInspecting, setIsInspecting] = useState(false);
+  
+  // Upgrade modal
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
+  const [upgradeMessage, setUpgradeMessage] = useState('');
 
   // Indexer State
   const [indexerUrls, setIndexerUrls] = useState("");
@@ -35,12 +56,31 @@ export default function Dashboard() {
   const [isIndexerSubmitting, setIsIndexerSubmitting] = useState(false);
   const [indexerResult, setIndexerResult] = useState<string | null>(null);
 
+  // Fetch usage data
+  useEffect(() => {
+    if (status === "authenticated") {
+      fetchUsage();
+    }
+  }, [status]);
+
   // Fetch sites when user authenticates
   useEffect(() => {
     if (status === "authenticated" && activeApp === 'console') {
       fetchSites();
     }
   }, [status, activeApp]);
+
+  const fetchUsage = async () => {
+    try {
+      const res = await fetch('/api/usage');
+      if (res.ok) {
+        const data = await res.json();
+        setUsage(data);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
 
   const fetchSites = async () => {
     if (sites.length > 0) return; // Prevent over-fetching
@@ -50,6 +90,9 @@ export default function Dashboard() {
       const data = await res.json();
       if (data.success) {
         setSites(data.sites);
+        if (data.hasMoreSites) {
+          setUpgradeMessage(data.upgradeMessage);
+        }
       }
     } catch (e) {
       console.error(e);
@@ -66,7 +109,6 @@ export default function Dashboard() {
     setUrlAnalyses({});
 
     try {
-      // Fix for sc-domain: prefix
       const queryParam = encodeURIComponent(siteUrl);
       const res = await fetch(`/api/gsc/urls?siteUrl=${queryParam}`);
 
@@ -89,11 +131,42 @@ export default function Dashboard() {
     }
   };
 
+  const checkAndShowUpgrade = (message: string) => {
+    setUpgradeMessage(message);
+    setShowUpgradeModal(true);
+  };
+
   const submitIndexing = async (targetUrls: string[], type: 'gsc' | 'indexnow') => {
     if (targetUrls.length === 0) return;
-    if (targetUrls.length > 200 && type === 'gsc') {
-      alert("Google allows a maximum of 200 indexing requests per day per property.");
+    
+    // Check if user has plan limits
+    if (!usage) {
+      checkAndShowUpgrade('Please sign in to use this feature.');
       return;
+    }
+
+    if (type === 'gsc') {
+      if (targetUrls.length > 200) {
+        alert("Google allows a maximum of 200 indexing requests per day per property.");
+        return;
+      }
+      
+      // Check bulk indexing permission
+      if (targetUrls.length > 1 && !usage.limits.bulkIndexing) {
+        checkAndShowUpgrade('Bulk indexing requires a paid plan. Upgrade to submit multiple URLs at once.');
+        return;
+      }
+
+      // Check if daily limit would be exceeded
+      if (usage.usage.gscRequestsToday + targetUrls.length > usage.limits.gscRequestsPerDay) {
+        checkAndShowUpgrade(`You've reached your daily limit of ${usage.limits.gscRequestsPerDay} GSC requests. Upgrade for more.`);
+        return;
+      }
+    } else {
+      if (usage.usage.indexNowRequestsToday + targetUrls.length > usage.limits.indexNowRequestsPerDay) {
+        checkAndShowUpgrade(`You've reached your daily limit of ${usage.limits.indexNowRequestsPerDay} IndexNow requests. Upgrade for more.`);
+        return;
+      }
     }
 
     setIsSubmitting(true);
@@ -118,16 +191,26 @@ export default function Dashboard() {
         alert(`Successfully sent ${targetUrls.length} URLs to IndexNow!`);
       } else {
         for (let i = 0; i < targetUrls.length; i++) {
-          await fetch('/api/gsc', {
+          const res = await fetch('/api/gsc', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url: targetUrls[i], type: 'URL_UPDATED' })
           });
+          
+          if (res.status === 429) {
+            const data = await res.json();
+            checkAndShowUpgrade(data.error || 'Usage limit exceeded');
+            break;
+          }
+          
           successCount++;
           await new Promise(resolve => setTimeout(resolve, 300));
         }
         alert(`Successfully submitted ${successCount} URLs to Google Search Console for indexing!`);
       }
+      
+      // Refresh usage after submission
+      fetchUsage();
     } catch (e) {
       console.error(e);
       alert("An error occurred during submission. Re-check the console.");
@@ -144,6 +227,17 @@ export default function Dashboard() {
 
     if (selectedUrls.length > 50) {
       alert("To avoid Google rate limits, please inspect less than 50 URLs at a time.");
+      return;
+    }
+
+    // Check usage limits
+    if (!usage) {
+      checkAndShowUpgrade('Please sign in to use this feature.');
+      return;
+    }
+
+    if (usage.usage.gscRequestsToday + selectedUrls.length > usage.limits.gscRequestsPerDay) {
+      checkAndShowUpgrade(`You've reached your daily limit of ${usage.limits.gscRequestsPerDay} GSC requests. Upgrade for more.`);
       return;
     }
 
@@ -167,6 +261,12 @@ export default function Dashboard() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ url: targetUrl, siteUrl: selectedSite })
           });
+
+          if (res.status === 429) {
+            const data = await res.json();
+            checkAndShowUpgrade(data.error || 'Usage limit exceeded');
+            break;
+          }
 
           if (!res.ok) throw new Error("API Error");
           const data = await res.json();
@@ -194,6 +294,9 @@ export default function Dashboard() {
           await new Promise(r => setTimeout(r, 500));
         }
       }
+      
+      // Refresh usage
+      fetchUsage();
     } catch (e) {
       console.error("Inspection error", e);
       alert("A general error occurred during inspection.");
@@ -228,6 +331,12 @@ export default function Dashboard() {
       alert("No valid URLs found.");
       return;
     }
+    
+    // Check batch size limit
+    if (usage && urlsToSubmit.length > usage.limits.urlsPerBatch) {
+      checkAndShowUpgrade(`Your plan allows ${usage.limits.urlsPerBatch} URLs per batch. Upgrade for larger batches.`);
+      return;
+    }
 
     setIsIndexerSubmitting(true);
     setIndexerResult(null);
@@ -252,8 +361,42 @@ export default function Dashboard() {
     }
   };
 
+  // Calculate usage percentage
+  const gscUsagePercent = usage 
+    ? Math.min((usage.usage.gscRequestsToday / usage.limits.gscRequestsPerDay) * 100, 100)
+    : 0;
+
   return (
     <div className="min-h-screen bg-[#050505] text-slate-200 font-sans selection:bg-indigo-500/30">
+      {/* Upgrade Modal */}
+      {showUpgradeModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
+          <div className="bg-[#0a0a0a] border border-slate-800 rounded-2xl p-6 max-w-md w-full shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-full bg-amber-500/20 flex items-center justify-center">
+                <Zap className="w-5 h-5 text-amber-500" />
+              </div>
+              <h3 className="text-lg font-semibold text-white">Upgrade Required</h3>
+            </div>
+            <p className="text-slate-400 mb-6">{upgradeMessage}</p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => setShowUpgradeModal(false)}
+                className="flex-1 py-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-white transition-colors"
+              >
+                Maybe Later
+              </button>
+              <a
+                href="/pricing"
+                className="flex-1 py-2.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition-colors text-center font-medium"
+              >
+                View Plans
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
       <header className="sticky top-0 z-50 border-b border-indigo-500/10 bg-black/40 backdrop-blur-xl">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-6">
@@ -271,6 +414,23 @@ export default function Dashboard() {
           </div>
 
           <div className="flex items-center gap-4">
+            {/* Usage Indicator */}
+            {status === "authenticated" && usage && (
+              <div className="hidden md:flex items-center gap-3 px-3 py-1.5 bg-slate-900/50 rounded-lg border border-slate-800">
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-emerald-500" />
+                  <span className="text-xs text-slate-400">
+                    {usage.usage.gscRequestsToday} / {usage.limits.gscRequestsPerDay}
+                  </span>
+                </div>
+                <div className="w-px h-3 bg-slate-700" />
+                <a href="/dashboard" className="text-xs text-indigo-400 hover:text-indigo-300 flex items-center gap-1">
+                  <BarChart3 className="w-3 h-3" />
+                  Dashboard
+                </a>
+              </div>
+            )}
+
             {/* Mobile App Toggle Menu */}
             <div className="sm:hidden flex bg-slate-900 border border-slate-800 rounded-lg p-1">
               <button onClick={() => setActiveApp('console')} className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${activeApp === 'console' ? 'bg-indigo-500/20 text-indigo-400' : 'text-slate-400'}`}>GSC</button>
@@ -319,6 +479,27 @@ export default function Dashboard() {
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-12">
+        {/* Plan Banner for Free Users */}
+        {status === "authenticated" && usage?.plan === 'FREE' && (
+          <div className="mb-8 p-4 bg-gradient-to-r from-indigo-500/10 to-purple-500/10 border border-indigo-500/20 rounded-xl flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-lg bg-indigo-500/20 flex items-center justify-center">
+                <Zap className="w-5 h-5 text-indigo-400" />
+              </div>
+              <div>
+                <h3 className="font-medium text-white">You're on the Free plan</h3>
+                <p className="text-sm text-slate-400">Get more indexing power with our paid plans</p>
+              </div>
+            </div>
+            <a
+              href="/pricing"
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg transition-colors text-sm font-medium"
+            >
+              Upgrade
+            </a>
+          </div>
+        )}
+
         {activeApp === 'indexer' ? (
           /* Backlink Indexer View */
           <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
@@ -355,7 +536,11 @@ export default function Dashboard() {
               <div>
                 <label className="block text-sm font-medium text-slate-300 mb-2 flex justify-between">
                   <span>URLs to Index</span>
-                  <span className="text-slate-500">{indexerUrls.split('\n').filter(u => u.trim() !== '' && u.startsWith('http')).length} valid URLs</span>
+                  {usage && (
+                    <span className="text-slate-500">
+                      {indexerUrls.split('\n').filter(u => u.trim() !== '' && u.startsWith('http')).length} / {usage.limits.urlsPerBatch} URLs
+                    </span>
+                  )}
                 </label>
                 <textarea
                   value={indexerUrls}
@@ -395,9 +580,10 @@ export default function Dashboard() {
               <div className="rounded-2xl border border-indigo-500/20 bg-gradient-to-b from-indigo-500/5 to-transparent p-12 backdrop-blur-sm flex flex-col items-center text-center mt-12">
                 <ShieldCheck className="w-16 h-16 text-indigo-400 mb-6" />
                 <h2 className="text-2xl font-bold text-white mb-4">Connect Your Search Console</h2>
+                <p className="text-slate-400 mb-6 max-w-md">Sign in with Google to access your Search Console properties and start indexing your URLs.</p>
                 <button
                   onClick={() => signIn('google')}
-                  className="px-8 py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl mt-6 flex items-center gap-3"
+                  className="px-8 py-4 bg-indigo-600 hover:bg-indigo-500 text-white font-medium rounded-xl flex items-center gap-3"
                 >
                   Sign in with Google <ArrowRight className="w-5 h-5" />
                 </button>
@@ -418,6 +604,26 @@ export default function Dashboard() {
                   </div>
                 ) : urls.length > 0 ? (
                   <div className="bg-[#0a0a0a] border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+                    {/* Usage Bar */}
+                    {usage && (
+                      <div className="px-4 py-3 border-b border-slate-800 bg-slate-900/50">
+                        <div className="flex items-center justify-between text-xs mb-2">
+                          <span className="text-slate-400">Daily GSC Usage</span>
+                          <span className={gscUsagePercent > 80 ? 'text-red-400' : 'text-slate-400'}>
+                            {usage.usage.gscRequestsToday} / {usage.limits.gscRequestsPerDay} requests
+                          </span>
+                        </div>
+                        <div className="h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                          <div 
+                            className={`h-full rounded-full transition-all ${
+                              gscUsagePercent > 80 ? 'bg-red-500' : gscUsagePercent > 50 ? 'bg-amber-500' : 'bg-emerald-500'
+                            }`}
+                            style={{ width: `${gscUsagePercent}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+
                     <div className="p-4 border-b border-slate-800 bg-black/40 flex justify-between items-center sm:flex-row flex-col gap-4">
                       <div className="flex items-center gap-4">
                         <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-300 font-medium bg-white/5 py-1.5 px-3 rounded-lg hover:bg-white/10 transition-colors">
@@ -564,6 +770,7 @@ export default function Dashboard() {
                   <div className="p-12 border border-dashed border-slate-700 rounded-2xl flex flex-col items-center justify-center text-slate-500 bg-black/20">
                     <AlertCircle className="w-8 h-8 mb-4 text-amber-500/70" />
                     <p className="font-medium text-slate-300">No Verified Properties Found</p>
+                    <p className="text-sm mt-2 text-center max-w-md">Connect a Google Search Console property to get started.</p>
                   </div>
                 )}
               </>
